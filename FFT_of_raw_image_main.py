@@ -1422,12 +1422,6 @@ def plot_shifted_fft_with_windows(abs_fft_shifted, width, height, edge_coords):
     freq_x = fftfreq(width, 1)   # Frequency range in the x-axis
     freq_y = fftfreq(height, 1)  # Frequency range in the y-axis
 
-    print(freq_x)
-    print(freq_y)
-
-    print(np.shape(freq_x))
-    print(np.shape(freq_y))
-
     # Create the frequency grids
     freq_x_grid, freq_y_grid = np.meshgrid(freq_x, freq_y)
 
@@ -1480,6 +1474,86 @@ def plot_shifted_fft_with_windows(abs_fft_shifted, width, height, edge_coords):
 
     plt.tight_layout()
 
+def plot_shifted_fft_with_windows_45(abs_fft_shifted, width, height, edge_coords):
+
+    b_pz1 = edge_coords[0]
+    t_pz1 = edge_coords[1]
+    l_pz1 = edge_coords[2]
+    r_pz1 = edge_coords[3]
+    b_pz2 = edge_coords[4]
+    t_pz2 = edge_coords[5]
+    l_pz2 = edge_coords[6]
+    r_pz2 = edge_coords[7]
+    b_pp1 = edge_coords[8]
+    t_pp1 = edge_coords[9]
+    l_pp1 = edge_coords[10]
+    r_pp1 = edge_coords[11]
+    b_pp2 = edge_coords[12]
+    t_pp2 = edge_coords[13]
+    l_pp2 = edge_coords[14]
+    r_pp2 = edge_coords[15]
+    b_pm1 = edge_coords[16]
+    t_pm1 = edge_coords[17]
+    l_pm1 = edge_coords[18]
+    r_pm1 = edge_coords[19]
+    b_pm2 = edge_coords[20]
+    t_pm2 = edge_coords[21]
+    l_pm2 = edge_coords[22]
+    r_pm2 = edge_coords[23]
+
+    # Define the frequency axes
+    freq_x = fftfreq(width, 1)   # Frequency range in the x-axis
+    freq_y = fftfreq(height, 1)  # Frequency range in the y-axis
+
+    # Create the frequency grids
+    freq_x_grid, freq_y_grid = np.meshgrid(freq_x, freq_y)
+
+    # Shift the grids to match the FFT shift
+    freq_x_grid_shifted = fftshift(freq_x_grid)
+    freq_y_grid_shifted = fftshift(freq_y_grid)
+
+    plt.imshow(np.log(abs_fft_shifted + 1), extent=(np.min(freq_x), np.max(freq_x), np.min(freq_y), np.max(freq_y)), origin='lower') # [y_to_keep[0]:y_to_keep[1], x_to_keep[0]:x_to_keep[1]] freq_x[x_to_keep[1]], freq_x[x_to_keep[0]], freq_y[y_to_keep[1]], freq_y[y_to_keep[0]]
+    # Add axis labels and title
+    plt.xlabel('x freq. (cycles/pix.)', fontsize=16)
+    plt.ylabel('y freq. (cycles/pix.)', fontsize=16)
+
+    # Add colorbar with vertical label
+    cbar = plt.colorbar(label=r'$log(\hat{I}+1)$', pad=0.02)
+    cbar.ax.set_ylabel(r'$log(\hat{I}+1)$', rotation=90, labelpad=15, fontsize=16)
+    cbar.ax.tick_params(labelsize=14) 
+
+    # Customize ticks
+    plt.xticks(np.arange(-.1, .15, 0.05), fontsize=14)
+    plt.yticks(fontsize=14)
+
+    # FFT with masking rectangles shown
+    bottom_left_pz1 = [freq_y_grid_shifted[b_pz1 - height//2][0], freq_x_grid_shifted[0][l_pz1  + width//2]]
+    bottom_left_pz2 = [freq_y_grid_shifted[b_pz2 + height//2][0], freq_x_grid_shifted[0][l_pz2 - width//2]]
+    bottom_left_pp1 = [freq_y_grid_shifted[b_pp1 - height//2][0], freq_x_grid_shifted[0][l_pp1 + width//2]]
+    bottom_left_pp2 =  [freq_y_grid_shifted[b_pp2 + height//2][0], freq_x_grid_shifted[0][l_pp2 - width//2]]
+    bottom_left_pm1 = [freq_y_grid_shifted[b_pm1 - height//2][0], freq_x_grid_shifted[0][l_pm1 + width//2]]
+    bottom_left_pm2 = [freq_y_grid_shifted[b_pm2 + height//2][0], freq_x_grid_shifted[0][l_pm2 - width//2]]
+
+    bottom_lefts = np.array([bottom_left_pz1, bottom_left_pz2, bottom_left_pp1, bottom_left_pp2, bottom_left_pm1, bottom_left_pm2])
+    bottom_lefts = np.array([bl[::-1] for bl in bottom_lefts])
+    
+    widths = ((np.max(freq_x) - np.min(freq_x))/width) * np.array([(r_pz1 - l_pz1), (r_pz2 - l_pz2), (r_pp1 - l_pp1), (r_pp2 - l_pp2), (r_pm1 - l_pm1), (r_pm2 - l_pm2)])
+    heights = ((np.max(freq_y) - np.min(freq_y))/height) * np.array([(t_pz1 - b_pz1), (t_pz2 - b_pz2), (t_pp1 - b_pp1), (t_pp2 - b_pp2), (t_pm1 - b_pm1), (t_pm2 - b_pm2)])
+
+    rectangles = []
+    for i in range(len(widths)):
+        rectangle = patches.Rectangle((bottom_lefts[i]),  widths[i],  heights[i],  edgecolor='red', facecolor='none', linewidth=1)
+        rectangles.append(rectangle)
+    
+
+    for i in range(len(rectangles)):
+        plt.gca().add_patch(rectangles[i])
+
+    # Set axis limits
+    plt.xlim(-0.13, 0.13) 
+    plt.ylim(-0.08, 0.08)
+
+    plt.tight_layout()
 
 def plot_all_thetas(theta_out_1_pp, theta_out_1_pm, theta_out_1_arith, theta_out_2, edge_cols, edge_rows):
 
@@ -1738,24 +1812,67 @@ def plot_gaussian(x_data, y_data, a_fit, x0_fit, sigma_fit, b_fit, p_fit, label,
     plt.legend()
     plt.grid()
 
-def find_edge_of_circle(arr, threshold_ratio):
+def find_noise_of_image(mean_columns, raw_image, threshold_for_cum_diff=0.001):
+
+    mean_columns = np.array(mean_columns)
+
+    
+    # Compute the cumulative moving average (CMA)
+    cumulative_avg = np.cumsum(mean_columns) / np.arange(1, len(mean_columns) + 1)
+    
+    # Compute differences in CMA
+    diff = np.diff(cumulative_avg)  # Difference between consecutive elements in CMA
+
+    index_at_increase = np.where(diff > threshold_for_cum_diff)[0][0]
+
+    noise_image = np.mean(raw_image[:, 0:index_at_increase])
+    noise_image_std = np.std(raw_image[:, 0:index_at_increase])
+
+    return noise_image, noise_image_std
+
+
+# def find_edge_of_circle(arr, threshold_ratio):
+#     """
+#     Find the first index where the array exceeds a threshold proportion 
+#     of its maximum value.
+
+#     Parameters:
+#         arr (array-like): Input 1D array.
+#         threshold_ratio (float): Proportion of the maximum value (0 to 1).
+
+#     Returns:
+#         int: Index of the first value exceeding the threshold, or -1 if none found.
+#     """ 
+#     arr = np.array(arr)  # Convert to NumPy array
+#     max_value = np.max(arr)  # Find max value
+#     threshold = threshold_ratio * max_value  # Compute proportional threshold
+
+#     print(np.where(arr > threshold))
+#     indices = np.where(arr > threshold)[0]  # Find indices where condition is met
+#     return indices[0] if len(indices) > 0 else -1  # Return first match or -1 if none found
+
+
+def find_edge_of_circle(mean_col_arr, mean_row_arr, threshold):
     """
-    Find the first index where the array exceeds a threshold proportion 
-    of its maximum value.
+    Find the first index where the array exceeds a given absolute threshold.
 
     Parameters:
         arr (array-like): Input 1D array.
-        threshold_ratio (float): Proportion of the maximum value (0 to 1).
+        threshold (float): Absolute threshold value.
 
     Returns:
         int: Index of the first value exceeding the threshold, or -1 if none found.
-    """
-    arr = np.array(arr)  # Convert to NumPy array
-    max_value = np.max(arr)  # Find max value
-    threshold = threshold_ratio * max_value  # Compute proportional threshold
+    """ 
+    mean_col_arr = np.array(mean_col_arr)  # Convert to NumPy array
+    mean_row_arr = np.array(mean_row_arr)  # Convert to NumPy array
 
-    indices = np.where(arr > threshold)[0]  # Find indices where condition is met
-    return indices[0] if len(indices) > 0 else -1  # Return first match or -1 if none found
+    indices_col = [int(np.where(mean_col_arr > threshold)[0][0]), int(np.where(mean_col_arr > threshold)[0][-1])]  # Find indices where condition is met
+    indices_row = [int(np.where(mean_row_arr > threshold)[0][0]), int(np.where(mean_row_arr > threshold)[0][-1])] 
+
+    print(indices_col)
+    print(indices_row)
+
+    return indices_row, indices_col
 
 
 def line_of_best_fit(x_data, y_data, xmin, xmax):
@@ -1810,9 +1927,9 @@ def plane_of_best_fit(x_data, y_data, z_data):
 
 if __name__ == '__main__':
 
-    folderpath = '/home/sfv514/Documents/Project/Camera/Saved Images/28-01-25/Full system with hwp/'
+    folderpath = '/home/sfv514/Documents/Project/Camera/Saved Images/28-01-25/Full system with hwp 45 degs/'
 
-    filename = 'Acquisition_113537'
+    filename = 'Acquisition_131232'
 
     filepath = f'{folderpath}{filename}.raw'
 
@@ -1828,7 +1945,7 @@ if __name__ == '__main__':
 
     ## User settings
 
-    rotated_system = 'No'
+    rotated_system = 'Yes'
 
     if rotated_system == 'Yes':
         angle_name = angle_name - 45
@@ -1871,9 +1988,11 @@ if __name__ == '__main__':
 
     circle_center, y_data, x_data, a_fit, x0_fit, sigma_fit, b_fit, p_fit = find_center(raw_image=raw_image, width=width_original, height=height_original)
 
-    edge_of_circle = find_edge_of_circle(y_data[1], 0.18) # 0.28
+    noise_image, noise_image_std = find_noise_of_image(y_data[1], raw_image=original_image)
 
-    R = circle_center[1]-edge_of_circle
+    edge_of_circle_cols, edge_of_circle_rows = find_edge_of_circle(y_data[1], y_data[0], noise_image + 2*noise_image_std) # 0.28
+
+    R = round(np.mean([circle_center[1]-edge_of_circle_cols[0], edge_of_circle_cols[1] - circle_center[1], circle_center[0] - edge_of_circle_rows[0], edge_of_circle_rows[1] - circle_center[0]]))
     print(f'Radius of circle: {R} pix.')
 
 
@@ -1920,8 +2039,8 @@ if __name__ == '__main__':
     print('Noise std: ', noise_std)
 
     # Thresholds for window edges around FFT components
-    threshold = noise_floor + 80*noise_std
-    threshold_pz = noise_floor + 20*noise_std
+    threshold = noise_floor + 50*noise_std
+    threshold_pz = noise_floor + 40*noise_std
 
     if rotated_system == 'Yes':
 
@@ -2035,6 +2154,7 @@ if __name__ == '__main__':
     if global_calibration == 'Yes':
         print('### Using global calibration ###')
         calibration_function = -0.00280*X + 0.00283*Y + 2.930
+        calibration_function = -0.00274*X + 0.00350*Y + 2.64
     
     theta_calib = np.rad2deg(theta_out_arith) - calibration_function
 
@@ -2085,19 +2205,22 @@ if __name__ == '__main__':
         plot_fft_45(fft_image=fft_image, edge_coords=edge_coords)
         plt.show()
 
-        plt.imshow(np.log(fftshift(abs_fft)+1), origin='lower')
+        plot_shifted_fft_with_windows_45(abs_fft_shifted=fftshift(abs_fft), width=width, height=height, edge_coords=edge_coords)
         plt.show()
+
+        # plt.imshow(np.log(fftshift(abs_fft)+1), origin='lower')
+        # plt.show()
 
     elif rotated_system == 'No':
 
         plot_fft(fft_image=fft_image, edge_coords=edge_coords)
         plt.show()
-        # plot_shifted_fft(to_keep=0.3, fft_image=fft_image, width=width, height=height)
-        # plt.show()
+        plot_shifted_fft(to_keep=0.3, fft_image=fft_image, width=width, height=height)
+        plt.show()
+        
         plot_shifted_fft_with_windows(abs_fft_shifted=fftshift(abs_fft), width=width, height=height, edge_coords=edge_coords)
         plt.show()
-    
-    
+    fh
     plot_masked_fft(masked_fft_pz, masked_fft_pp, masked_fft_pm)
     plt.show()
     
