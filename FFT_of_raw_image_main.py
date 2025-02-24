@@ -10,12 +10,16 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from skimage.feature import peak_local_max
 from scipy.integrate import quad, simpson
 from scipy.signal import hilbert, find_peaks
+from scipy.signal.windows import tukey, hamming
 from scipy.ndimage import gaussian_filter, median_filter
 from scipy import interpolate
 from scipy.stats import linregress
 import math
 from datetime import datetime
 import pandas as pd
+import cv2
+from scipy.interpolate import CubicSpline, UnivariateSpline
+import seaborn as sns
 
 def read_image(filepath, width, height):
 # Read raw image data
@@ -32,14 +36,21 @@ def read_image(filepath, width, height):
     
     return raw_image
 
-def apply_hanning_window_to_image(raw_image):
+def apply_hanning_window_to_image(raw_image, rows_for_window, cols_for_window):
 
-    hanning_image_x = np.hanning(np.shape(raw_image)[1])
-    hanning_image_y = np.hanning(np.shape(raw_image)[0])
+    # x_hann = np.arange(cols_for_window[0], cols_for_window[1], 1)
+    # y_hann = np.arange(rows_for_window[0], rows_for_window[1], 1)
+
+    hanning_image_x = np.hanning(cols_for_window[1] - cols_for_window[0])
+    hanning_image_y = np.hanning(rows_for_window[1] - rows_for_window[0])
 
     hanning_window_image = np.outer(hanning_image_y, hanning_image_x)  # Create a 2D Hanning window
 
-    return raw_image*hanning_window_image
+    raw_image = raw_image.astype(np.float64)
+
+    raw_image[rows_for_window[0]:rows_for_window[1], cols_for_window[0]:cols_for_window[1]] *= hanning_window_image
+    
+    return raw_image
 
 def apply_gaussian_window_to_image(image, sigma):
 
@@ -74,7 +85,6 @@ def pad_image(image, percentage_of_pad):
     return padded_image, height, width, row_padding, col_padding
 
 
-
 def crop_circle(R, circle_center, a, raw_image):
 
     h = 2*R/np.sqrt(a**2+1)
@@ -104,6 +114,11 @@ def fft_2d(image, width, height):
 
     noise_floor = np.mean(abs_fft[:, 250:width-250])
     noise_std = np.std(abs_fft[:, 250:width-250])
+
+    # flattened_noise = abs_fft[:, 250:width-250].flatten()
+
+    # sns.histplot(flattened_noise, bins=100, kde=True, color='blue', stat="density", label="Noise Distribution")
+    # plt.show()
 
     # Shift the zero frequency component to the center of the spectrum
     fft_shifted = fftshift(fft_image)
@@ -162,7 +177,7 @@ def find_peaks_fft(function, width, height):
 
 def find_peaks_fft_45(function, width, height):
 
-    peaks = peak_local_max(function, min_distance=5, threshold_abs=.1e6, exclude_border=True)
+    peaks = peak_local_max(function, min_distance=5, threshold_abs=.5e6, exclude_border=True)
     print('No. peaks:', np.shape(peaks)[0])
 
     # considers peaks in the top left (tl) corner
@@ -190,74 +205,6 @@ def find_peaks_fft_45(function, width, height):
     all_bright_spot_coords = [coords_pz1, coords_pz2, coords_pp1, coords_pp2, coords_pm1, coords_pm2]
 
     return all_bright_spot_coords
-
-# def find_edge(image, edge_type, threshold, bright_spot_coords):
-#     """
-#     Find the edge coordinate in the FFT domain.
-
-#     Parameters:
-#         edge_type (str): The direction of the edge ('right', 'left', 'top', 'bottom').
-#         threshold (float): The threshold for determining the edge.
-#         bright_spot_coords (tuple): Coordinates of the bright spot (row, column).
-
-#     Returns:
-#         int: The coordinate of the detected edge, or None if the array edge is reached without satisfying the threshold.
-#     """
-#     if edge_type not in ['right', 'left', 'top', 'bottom']:
-#         raise ValueError("Invalid edge_type. Must be 'right', 'left', 'top', or 'bottom'.")
-
-#     # Initialize edge_coord based on the edge type
-#     edge_coord = bright_spot_coords[1] if edge_type in ['right', 'left'] else bright_spot_coords[0]
-
-#     # Get the array dimensions
-#     rows, cols = image.shape
-
-#     # Track consecutive pixels meeting the threshold
-#     consecutive_met = 0
-#     consecutive_threshold = 2
-
-#     while True:
-#         # Get the current and initial values
-#         current_value = (
-#             image[bright_spot_coords[0], edge_coord]
-#             if edge_type in ['right', 'left']
-#             else image[edge_coord, bright_spot_coords[1]]
-#         )
-#         initial_value = image[bright_spot_coords[0], bright_spot_coords[1]]
-
-#         # Check if the threshold condition is met
-#         if current_value / initial_value < threshold:
-#             consecutive_met += 1
-#         else:
-#             consecutive_met = 0
-
-#         # If two consecutive pixels meet the threshold, stop
-#         if consecutive_met >= 2:
-#             break
-
-#         # Move in the specified direction
-#         if edge_type == 'right':
-#             edge_coord += 1
-#             if edge_coord >= cols:
-#                 edge_coord = None
-#                 break
-#         elif edge_type == 'left':
-#             edge_coord -= 1
-#             if edge_coord < 0:
-#                 edge_coord = None
-#                 break
-#         elif edge_type == 'top':
-#             edge_coord += 1
-#             if edge_coord >= rows:
-#                 edge_coord = None
-#                 break
-#         elif edge_type == 'bottom':
-#             edge_coord -= 1
-#             if edge_coord < 0:
-#                 edge_coord = None
-#                 break
-
-#     return edge_coord
 
 def find_edge(image, edge_type, threshold, bright_spot_coords):
     """
@@ -326,6 +273,84 @@ def find_edge(image, edge_type, threshold, bright_spot_coords):
                 break
 
     return edge_coord
+
+def find_edge_grad(image, edge_type, bright_spot_coords, gradient_threshold=0):
+    """
+    Find the edge coordinate in the FFT domain when the gradient flattens out. Requires that two consecutive gradients are above/below the threshold.
+
+    Parameters:
+        image (ndarray): The 2D array representing the image.
+        edge_type (str): The direction of the edge ('right', 'left', 'top', 'bottom').
+        bright_spot_coords (tuple): Coordinates of the bright spot (row, column).
+        gradient_threshold (float): The threshold for detecting when the gradient flattens out.
+
+    Returns:
+        int: The coordinate of the detected edge, or None if the array edge is reached.
+    """
+    if edge_type not in ['right', 'left', 'top', 'bottom']:
+        raise ValueError("Invalid edge_type. Must be 'right', 'left', 'top', or 'bottom'.")
+
+
+    rows, cols = image.shape
+
+    if edge_type == 'right':
+        edge_coord = bright_spot_coords[1] + 3
+        while edge_coord < cols:
+            gradient = image[bright_spot_coords[0], edge_coord] - image[bright_spot_coords[0], edge_coord - 1]
+            gradient_2 = image[bright_spot_coords[0], edge_coord - 1] - image[bright_spot_coords[0], edge_coord - 2]
+            gradient_3 = image[bright_spot_coords[0], edge_coord - 2] - image[bright_spot_coords[0], edge_coord - 3]
+            #gradient_4 = image[bright_spot_coords[0], edge_coord - 3] - image[bright_spot_coords[0], edge_coord - 4]
+            if gradient > gradient_threshold and gradient_2 > gradient_threshold and gradient_3 > gradient_threshold:# and gradient_4 > gradient_threshold:
+                break
+            edge_coord = edge_coord + 1
+        if edge_coord == cols - 1:
+            final_edge_coord = edge_coord
+        else:
+            final_edge_coord = edge_coord - 3
+    elif edge_type == 'left':
+        edge_coord = bright_spot_coords[1] - 3
+        while edge_coord >= 0:
+            gradient = image[bright_spot_coords[0], edge_coord + 1] - image[bright_spot_coords[0], edge_coord]
+            gradient_2 = image[bright_spot_coords[0], edge_coord + 2] - image[bright_spot_coords[0], edge_coord + 1]
+            gradient_3 = image[bright_spot_coords[0], edge_coord + 3] - image[bright_spot_coords[0], edge_coord + 2]
+            #gradient_4 = image[bright_spot_coords[0], edge_coord + 4] - image[bright_spot_coords[0], edge_coord + 3]
+            if gradient < gradient_threshold and gradient_2 < gradient_threshold and gradient_3 < gradient_threshold:# and gradient_4 < gradient_threshold:
+                break
+            edge_coord = edge_coord - 1
+        if edge_coord == 0:
+            final_edge_coord = edge_coord
+        else:
+            final_edge_coord = edge_coord + 3
+    elif edge_type == 'top':
+        edge_coord = bright_spot_coords[0] + 3
+        while edge_coord < rows:
+            gradient = image[edge_coord, bright_spot_coords[1]] - image[edge_coord - 1, bright_spot_coords[1]]
+            gradient_2 = image[edge_coord -1, bright_spot_coords[1]] - image[edge_coord - 2, bright_spot_coords[1]]
+            gradient_3 = image[edge_coord - 2, bright_spot_coords[1]] - image[edge_coord - 3, bright_spot_coords[1]]
+            #gradient_4 = image[edge_coord - 3, bright_spot_coords[1]] - image[edge_coord - 4, bright_spot_coords[1]]
+            if gradient > gradient_threshold and gradient_2 > gradient_threshold and gradient_3 > gradient_threshold:# and gradient_4 > gradient_threshold:
+                break
+            edge_coord = edge_coord + 1
+        if edge_coord == rows - 1:
+            final_edge_coord = edge_coord
+        else:
+            final_edge_coord = edge_coord - 3
+    else: # bottom
+        edge_coord = bright_spot_coords[0] - 3
+        while edge_coord > 0:
+            gradient = image[edge_coord + 1, bright_spot_coords[1]] - image[edge_coord, bright_spot_coords[1]]
+            gradient_2 = image[edge_coord + 2, bright_spot_coords[1]] - image[edge_coord + 1, bright_spot_coords[1]]
+            gradient_3 = image[edge_coord + 3, bright_spot_coords[1]] - image[edge_coord + 2, bright_spot_coords[1]]
+            #gradient_4 = image[edge_coord + 4, bright_spot_coords[1]] - image[edge_coord + 3, bright_spot_coords[1]]
+            if gradient < gradient_threshold and gradient_2 < gradient_threshold and gradient_3 < gradient_threshold:# and gradient_4 < gradient_threshold:
+                break
+            edge_coord = edge_coord - 1
+        if edge_coord == 0:
+            final_edge_coord = edge_coord
+        else:
+            final_edge_coord = edge_coord + 3
+    
+    return final_edge_coord
 
 
 def calculate_edges(image, threshold, threshold_pz, all_bright_spot_coords, height):
@@ -657,7 +682,180 @@ def calculate_edges_45(image, threshold, threshold_pz, all_bright_spot_coords, h
 
     return edge_coords
 
-def define_masks(fft_hanning, edge_coords, height, width):
+def calculate_edges_45_grad(image, all_bright_spot_coords, height):
+
+    coords_pz1 = all_bright_spot_coords[0]
+    coords_pz2 = all_bright_spot_coords[1]
+    coords_pp1 = all_bright_spot_coords[2]
+    coords_pp2 = all_bright_spot_coords[3]
+    coords_pm1 = all_bright_spot_coords[4]
+    coords_pm2 = all_bright_spot_coords[5]
+
+    ### Plus zero
+
+    ## PZ1
+    # right edge
+    r_pz1 = find_edge_grad(image, edge_type='right', bright_spot_coords=coords_pz1)
+
+    # left edge
+    l_pz1 = find_edge_grad(image, edge_type='left', bright_spot_coords=coords_pz1)
+
+    # make the windows symmetical around bright spot
+    if np.abs(r_pz1 - coords_pz1[1]) < np.abs(l_pz1 - coords_pz1[1]):
+        l_pz1 = 2*coords_pz1[1] - r_pz1
+    else:
+        r_pz1 = 2*coords_pz1[1] - l_pz1
+
+    # top edge
+    t_pz1 = find_edge_grad(image, edge_type='top',  bright_spot_coords=coords_pz1)
+
+    # bottom edge
+    b_pz1 = find_edge_grad(image, edge_type='bottom',  bright_spot_coords=coords_pz1)
+
+    # make the windows symmetical around bright spot
+    if np.abs(t_pz1 - coords_pz1[0]) < np.abs(b_pz1 - coords_pz1[0]):
+        b_pz1 = 2*coords_pz1[0] - t_pz1
+    else:
+        t_pz1 = 2*coords_pz1[0] - b_pz1
+             
+
+    ## PZ2 
+    # right edge
+    r_pz2 = find_edge_grad(image, edge_type='right',  bright_spot_coords=coords_pz2)
+
+    # left edge
+    l_pz2 = find_edge_grad(image, edge_type='left',  bright_spot_coords=coords_pz2)
+
+    # make the windows symmetical around bright spot
+    if np.abs(r_pz2 - coords_pz2[1]) < np.abs(l_pz2 - coords_pz2[1]):
+        l_pz2 = 2*coords_pz2[1] - r_pz2
+    else:
+        r_pz2 = 2*coords_pz2[1] - l_pz2
+
+    # top edge
+    t_pz2 = find_edge_grad(image, edge_type='top',  bright_spot_coords=coords_pz2)
+
+    # bottom edge
+    b_pz2 = find_edge_grad(image, edge_type='bottom',  bright_spot_coords=coords_pz2)
+
+    # make the windows symmetical around bright spot
+    if np.abs(t_pz2 - coords_pz2[0]) < np.abs(b_pz2 - coords_pz2[0]):
+        b_pz2 = 2*coords_pz2[0] - t_pz2
+    else:
+        t_pz2 = 2*coords_pz2[0] - b_pz2
+
+
+    ### Plus plus
+
+    ## PP1
+    # right edge
+    r_pp1 = find_edge_grad(image, edge_type='right',  bright_spot_coords=coords_pp1)
+
+    # left edge
+    l_pp1 = find_edge_grad(image, edge_type='left',  bright_spot_coords=coords_pp1)
+
+    # make the windows symmetical around bright spot
+    if np.abs(r_pp1 - coords_pp1[1]) < np.abs(l_pp1 - coords_pp1[1]):
+        l_pp1 = 2*coords_pp1[1] - r_pp1
+    else:
+        r_pp1 = 2*coords_pp1[1] - l_pp1
+
+    # top edge
+    t_pp1 = find_edge_grad(image, edge_type='top',  bright_spot_coords=coords_pp1)
+
+    # bottom edge
+    b_pp1 = find_edge_grad(image, edge_type='bottom',  bright_spot_coords=coords_pp1)
+
+    # make the windows symmetical around bright spot
+    if np.abs(t_pp1 - coords_pp1[0]) < np.abs(b_pp1 - coords_pp1[0]):
+        b_pp1 = 2*coords_pp1[0] - t_pp1
+    else:
+        t_pp1 = 2*coords_pp1[0] - b_pp1
+    
+    
+    ## PP2 
+    # right edge
+    r_pp2 = find_edge_grad(image, edge_type='right',  bright_spot_coords=coords_pp2)
+
+    # left edge
+    l_pp2 = find_edge_grad(image, edge_type='left',  bright_spot_coords=coords_pp2)
+
+    # make the windows symmetical around bright spot
+    if np.abs(r_pp2 - coords_pp2[1]) < np.abs(l_pp2 - coords_pp2[1]):
+        l_pp2 = 2*coords_pp2[1] - r_pp2
+    else:
+        r_pp2 = 2*coords_pp2[1] - l_pp2
+
+    # top edge
+    t_pp2 = find_edge_grad(image, edge_type='top',  bright_spot_coords=coords_pp2)
+
+    # bottom edge
+    b_pp2 = find_edge_grad(image, edge_type='bottom',  bright_spot_coords=coords_pp2)
+
+    # make the windows symmetical around bright spot
+    if np.abs(t_pp2 - coords_pp2[0]) < np.abs(b_pp2 - coords_pp2[0]):
+        b_pp2 = 2*coords_pp2[0] - t_pp2
+    else:
+        t_pp2 = 2*coords_pp2[0] - b_pp2
+
+
+    ### Plus minus
+
+    ## PM1
+    # right edge
+    r_pm1 = find_edge_grad(image, edge_type='right',  bright_spot_coords=coords_pm1)
+
+    # left edge
+    l_pm1 = find_edge_grad(image, edge_type='left',  bright_spot_coords=coords_pm1)
+
+    # make the windows symmetical around bright spot
+    if np.abs(r_pm1 - coords_pm1[1]) < np.abs(l_pm1 - coords_pm1[1]):
+        l_pm1 = 2*coords_pm1[1] - r_pm1
+    else:
+        r_pm1 = 2*coords_pm1[1] - l_pm1
+
+    # top edge
+    t_pm1 = find_edge_grad(image, edge_type='top',  bright_spot_coords=coords_pm1)
+
+    # bottom edge
+    b_pm1 = find_edge_grad(image, edge_type='bottom',  bright_spot_coords=coords_pm1)
+
+    # make the windows symmetical around bright spot
+    if np.abs(t_pm1 - coords_pm1[0]) < np.abs(b_pm1 - coords_pm1[0]):
+        b_pm1 = 2*coords_pm1[0] - t_pm1
+    else:
+        t_pm1 = 2*coords_pm1[0] - b_pm1
+
+    ## PM2 
+    # right edge
+    r_pm2 = find_edge_grad(image, edge_type='right',  bright_spot_coords=coords_pm2)
+
+    # left edge
+    l_pm2 = find_edge_grad(image, edge_type='left',  bright_spot_coords=coords_pm2)
+
+    # make the windows symmetical around bright spot
+    if np.abs(r_pm2 - coords_pm2[1]) < np.abs(l_pm2 - coords_pm2[1]):
+        l_pm2 = 2*coords_pm2[1] - r_pm2
+    else:
+        r_pm2 = 2*coords_pm2[1] - l_pm2
+
+    # top edge
+    t_pm2 = find_edge_grad(image, edge_type='top',  bright_spot_coords=coords_pm2)
+
+    # bottom edge
+    b_pm2 = find_edge_grad(image, edge_type='bottom',  bright_spot_coords=coords_pm2)
+
+    # make the windows symmetical around bright spot
+    if np.abs(t_pm2 - coords_pm2[0]) < np.abs(b_pm2 - coords_pm2[0]):
+        b_pm2 = 2*coords_pm2[0] - t_pm2
+    else:
+        t_pm2 = 2*coords_pm2[0] - b_pm2
+
+    edge_coords = [b_pz1, t_pz1, l_pz1, r_pz1, b_pz2, t_pz2, l_pz2, r_pz2, b_pp1, t_pp1, l_pp1, r_pp1, b_pp2, t_pp2, l_pp2, r_pp2, b_pm1, t_pm1, l_pm1, r_pm1, b_pm2, t_pm2, l_pm2, r_pm2]
+
+    return edge_coords
+
+def define_masks(fft_window, edge_coords, height, width):
     # Initialize empty masks with the same shape as the image
     mask_pz1 = np.zeros((height, width))
     mask_pz2 = np.zeros((height, width))
@@ -701,7 +899,7 @@ def define_masks(fft_hanning, edge_coords, height, width):
     l_pm2 = edge_coords[30]
     r_pm2 = edge_coords[31]
 
-    if fft_hanning == 'Yes':
+    if fft_window == 'hanning':
 
         hann_window_pz1_y = np.hanning(2*(t_pz1-b_pz1))  # 1D Hanning window
         hann_window_pz1_x = np.hanning(r_pz1-l_pz1)  # 1D Hanning window
@@ -748,7 +946,7 @@ def define_masks(fft_hanning, edge_coords, height, width):
         mask_pm1[b_pm1:t_pm1, l_pm1:r_pm1] = hann_window_pm1
         mask_pm2[b_pm2:t_pm2, l_pm2:r_pm2] = hann_window_pm2
 
-    elif fft_hanning =='No':
+    elif fft_window == 'tophat':
 
         # Applying Hanning window to each mask instead of using ones
         mask_pz1[b_pz1:t_pz1, l_pz1:r_pz1] = 1
@@ -764,7 +962,7 @@ def define_masks(fft_hanning, edge_coords, height, width):
         mask_pm2[b_pm2:t_pm2, l_pm2:r_pm2] = 1
 
     else:
-        print('Define Hanning!')
+        print('Define windowing!')
     # Combine masks for different regions
     mask_pz = mask_pz1 + mask_pz2 + mask_pz3 + mask_pz4 # (+0)
     mask_pp = mask_pp1 + mask_pp2 # (++)
@@ -772,7 +970,7 @@ def define_masks(fft_hanning, edge_coords, height, width):
 
     return mask_pz, mask_pp, mask_pm
 
-def define_masks_45(fft_hanning, edge_coords, height, width):
+def define_masks_45(fft_window, edge_coords, height, width, alpha):
 
     # Initialize empty masks with the same shape as the image
     mask_pz1 = np.zeros((height, width))
@@ -807,15 +1005,15 @@ def define_masks_45(fft_hanning, edge_coords, height, width):
     l_pm2 = edge_coords[22]
     r_pm2 = edge_coords[23]
 
-    if fft_hanning == 'Yes':
+    if fft_window == 'hanning':
 
-        hann_window_pz1_y = np.hanning(2*(t_pz1-b_pz1))  # 1D Hanning window
+        hann_window_pz1_y = np.hanning(t_pz1-b_pz1)  # 1D Hanning window
         hann_window_pz1_x = np.hanning(r_pz1-l_pz1)  # 1D Hanning window
-        hann_window_pz1 = np.outer(hann_window_pz1_y, hann_window_pz1_x)[np.shape(hann_window_pz1_y)[0]//2:,:]  # Create a 2D Hanning window
+        hann_window_pz1 = np.outer(hann_window_pz1_y, hann_window_pz1_x)  # Create a 2D Hanning window
 
-        hann_window_pz2_y = np.hanning(2*(t_pz2-b_pz2))  # 1D Hanning window
+        hann_window_pz2_y = np.hanning(t_pz2-b_pz2)  # 1D Hanning window
         hann_window_pz2_x = np.hanning(r_pz2-l_pz2)  # 1D Hanning window
-        hann_window_pz2 = np.outer(hann_window_pz2_y, hann_window_pz2_x)[np.shape(hann_window_pz2_y)[0]//2:,:]  # Create a 2D Hanning window
+        hann_window_pz2 = np.outer(hann_window_pz2_y, hann_window_pz2_x)  # Create a 2D Hanning window
 
         hann_window_pp1_y = np.hanning(t_pp1-b_pp1)  # 1D Hanning window
         hann_window_pp1_x = np.hanning(r_pp1-l_pp1)  # 1D Hanning window
@@ -842,9 +1040,44 @@ def define_masks_45(fft_hanning, edge_coords, height, width):
 
         mask_pm1[b_pm1:t_pm1, l_pm1:r_pm1] = hann_window_pm1
         mask_pm2[b_pm2:t_pm2, l_pm2:r_pm2] = hann_window_pm2
+    
+    elif fft_window =='tukey':
 
-    elif fft_hanning =='No':
+        tukey_window_pz1_y = tukey(t_pz1-b_pz1, alpha=alpha)  # 1D Hanning window
+        tukey_window_pz1_x = tukey(r_pz1-l_pz1, alpha=alpha)  # 1D Hanning window
+        tukey_window_pz1 = np.outer(tukey_window_pz1_y, tukey_window_pz1_x)  # Create a 2D Hanning window
 
+        tukey_window_pz2_y = tukey(t_pz2-b_pz2, alpha=alpha)  # 1D Hanning window
+        tukey_window_pz2_x = tukey(r_pz2-l_pz2, alpha=alpha)  # 1D Hanning window
+        tukey_window_pz2 = np.outer(tukey_window_pz2_y, tukey_window_pz2_x)  # Create a 2D Hanning window
+
+        tukey_window_pp1_y = tukey(t_pp1-b_pp1, alpha=alpha)  # 1D Hanning window
+        tukey_window_pp1_x = tukey(r_pp1-l_pp1, alpha=alpha)  # 1D Hanning window
+        tukey_window_pp1 = np.outer(tukey_window_pp1_y, tukey_window_pp1_x)  # Create a 2D Hanning window
+
+        tukey_window_pp2_y = tukey(t_pp2-b_pp2, alpha=alpha)  # 1D Hanning window
+        tukey_window_pp2_x = tukey(r_pp2-l_pp2, alpha=alpha)  # 1D Hanning window
+        tukey_window_pp2 = np.outer(tukey_window_pp2_y, tukey_window_pp2_x)  # Create a 2D Hanning window
+
+        tukey_window_pm1_y = tukey(t_pm1-b_pm1, alpha=alpha)  # 1D Hanning window
+        tukey_window_pm1_x = tukey(r_pm1-l_pm1, alpha=alpha)  # 1D Hanning window
+        tukey_window_pm1 = np.outer(tukey_window_pm1_y, tukey_window_pm1_x)  # Create a 2D Hanning window
+
+        tukey_window_pm2_y = tukey(t_pm2-b_pm2, alpha=alpha)  # 1D Hanning window
+        tukey_window_pm2_x = tukey(r_pm2-l_pm2, alpha=alpha)  # 1D Hanning window
+        tukey_window_pm2 = np.outer(tukey_window_pm2_y, tukey_window_pm2_x)  # Create a 2D Hanning window
+
+        # Applying Hanning window to each mask instead of using ones
+        mask_pz1[b_pz1:t_pz1, l_pz1:r_pz1] = tukey_window_pz1
+        mask_pz2[b_pz2:t_pz2, l_pz2:r_pz2] = tukey_window_pz2
+
+        mask_pp1[b_pp1:t_pp1, l_pp1:r_pp1] = tukey_window_pp1
+        mask_pp2[b_pp2:t_pp2, l_pp2:r_pp2] = tukey_window_pp2
+
+        mask_pm1[b_pm1:t_pm1, l_pm1:r_pm1] = tukey_window_pm1
+        mask_pm2[b_pm2:t_pm2, l_pm2:r_pm2] = tukey_window_pm2
+
+    elif fft_window == 'tophat':
         # Applying Hanning window to each mask instead of using ones
         mask_pz1[b_pz1:t_pz1, l_pz1:r_pz1] = 1
         mask_pz2[b_pz2:t_pz2, l_pz2:r_pz2] = 1
@@ -856,12 +1089,13 @@ def define_masks_45(fft_hanning, edge_coords, height, width):
         mask_pm2[b_pm2:t_pm2, l_pm2:r_pm2] = 1
 
     else:
-        print('Define Hanning!')
+        print('Define windowing!')
+
     # Combine masks for different regions
     mask_pz = mask_pz1 + mask_pz2 # (+0)
     mask_pp = mask_pp1 + mask_pp2 # (++)
     mask_pm = mask_pm1 + mask_pm2 # (+-)
-
+  
     return mask_pz, mask_pp, mask_pm
 
 def apply_masks(mask_pz, mask_pp, mask_pm, fft_function):
@@ -916,45 +1150,7 @@ def compute_amplitude_2d_hilbert(function, function_name, gaussian_pre_smoothing
 
     return amplitude_tot
 
-def cosine_fitting_2d(function):
 
-    coords = (X, Y)
-
-    xdata = np.vstack((X.ravel(), Y.ravel()))
-
-    zdata = np.real(function)
-    zdata_rav = zdata.ravel()
-
-    if np.array_equal(function, ifft_pz):
-        initial_guess = [100, 100, 100, beta * omega_sigma, 0, gamma * omega_sigma, 0]
-        function_name = '(+0)'
-
-    elif np.array_equal(function, ifft_pp):
-        initial_guess = [-100, 100, -100, beta * omega_sigma, alpha * omega_sigma, gamma * omega_sigma, 0]
-        function_name = '(++)'
-
-    elif np.array_equal(function, ifft_pm):
-        initial_guess = [100, 100, 100, beta * omega_sigma, -alpha * omega_sigma, gamma * omega_sigma, 0]
-        function_name = '(+-)'
-
-    else:
-        raise ValueError('Specify a valid function for function_to_fit')
-
-    # Fit the model to the data
-    params, covariance = curve_fit(cosine_2d_linear, xdata, zdata_rav, p0=initial_guess)
-
-    # Output parameters
-    A_fit, B_fit, C_fit, kx_fit, ky_fit, phi_fit, D_fit = params
-
-    print(f"Fitted parameters: A={A_fit}, B={B_fit}, C={C_fit}, kx={kx_fit}, ky={ky_fit}, phi={phi_fit}, D={D_fit}")
-
-    amplitude = A_fit*X + B_fit*Y + C_fit
-
-    #params = np.delete(params, [1, 4])
-
-    Z_fit = cosine_2d_linear(coords, *params)
-
-    return amplitude, Z_fit, zdata, function_name, params, coords
     
 def find_peaks_2d(function):
     """
@@ -1065,7 +1261,7 @@ def calculate_theta(A_pz, A_pp, A_pm, height, width):
 
     theta_out_00 = theta_out_1_arith[height//2, width//2]
 
-    print(f'Theta out_2 (0, 0): {np.rad2deg(theta_out_00):.3f}° ({np.rad2deg(np.min(theta_out_1_arith)):.3f}° - {np.rad2deg(np.max(theta_out_1_arith)):.3f}°)')
+    print(f'Uncalibrated central theta = {np.rad2deg(theta_out_00):.3f}°')
     print(f'Std theta_2 central lineout: {np.std(theta_out_1_arith[height//2, :])}')
 
     return theta_out_1_pp, theta_out_1_pm, theta_out_1_arith, theta_out_2
@@ -1216,8 +1412,16 @@ def plot_image_with_circle_boundary(image, circle_center, radius):
         edgecolor='red', facecolor='none', linewidth=1
     )
 
+    # Add a circular boundary
+    circle = patches.Circle(
+        (circle_center[1], circle_center[0]),  # Center of the circle
+        radius,  # Radius of the circle
+        edgecolor='blue', facecolor='none', linewidth=1
+    )
+
     plt.imshow(image, origin='lower')
     plt.gca().add_patch(square)
+    plt.gca().add_patch(circle)
 
 def plot_shifted_fft(to_keep, fft_image, width, height):
 
@@ -1310,7 +1514,7 @@ def plot_fft(fft_image, edge_coords):
 
 def plot_fft_45(fft_image, edge_coords):
 
-    plt.close()
+    #plt.close()
 
     b_pz1 = edge_coords[0]
     t_pz1 = edge_coords[1]
@@ -1422,12 +1626,6 @@ def plot_shifted_fft_with_windows(abs_fft_shifted, width, height, edge_coords):
     freq_x = fftfreq(width, 1)   # Frequency range in the x-axis
     freq_y = fftfreq(height, 1)  # Frequency range in the y-axis
 
-    print(freq_x)
-    print(freq_y)
-
-    print(np.shape(freq_x))
-    print(np.shape(freq_y))
-
     # Create the frequency grids
     freq_x_grid, freq_y_grid = np.meshgrid(freq_x, freq_y)
 
@@ -1480,6 +1678,86 @@ def plot_shifted_fft_with_windows(abs_fft_shifted, width, height, edge_coords):
 
     plt.tight_layout()
 
+def plot_shifted_fft_with_windows_45(abs_fft_shifted, width, height, edge_coords):
+
+    b_pz1 = edge_coords[0]
+    t_pz1 = edge_coords[1]
+    l_pz1 = edge_coords[2]
+    r_pz1 = edge_coords[3]
+    b_pz2 = edge_coords[4]
+    t_pz2 = edge_coords[5]
+    l_pz2 = edge_coords[6]
+    r_pz2 = edge_coords[7]
+    b_pp1 = edge_coords[8]
+    t_pp1 = edge_coords[9]
+    l_pp1 = edge_coords[10]
+    r_pp1 = edge_coords[11]
+    b_pp2 = edge_coords[12]
+    t_pp2 = edge_coords[13]
+    l_pp2 = edge_coords[14]
+    r_pp2 = edge_coords[15]
+    b_pm1 = edge_coords[16]
+    t_pm1 = edge_coords[17]
+    l_pm1 = edge_coords[18]
+    r_pm1 = edge_coords[19]
+    b_pm2 = edge_coords[20]
+    t_pm2 = edge_coords[21]
+    l_pm2 = edge_coords[22]
+    r_pm2 = edge_coords[23]
+
+    # Define the frequency axes
+    freq_x = fftfreq(width, 1)   # Frequency range in the x-axis
+    freq_y = fftfreq(height, 1)  # Frequency range in the y-axis
+
+    # Create the frequency grids
+    freq_x_grid, freq_y_grid = np.meshgrid(freq_x, freq_y)
+
+    # Shift the grids to match the FFT shift
+    freq_x_grid_shifted = fftshift(freq_x_grid)
+    freq_y_grid_shifted = fftshift(freq_y_grid)
+
+    plt.imshow(np.log(abs_fft_shifted + 1), extent=(np.min(freq_x), np.max(freq_x), np.min(freq_y), np.max(freq_y)), origin='lower') # [y_to_keep[0]:y_to_keep[1], x_to_keep[0]:x_to_keep[1]] freq_x[x_to_keep[1]], freq_x[x_to_keep[0]], freq_y[y_to_keep[1]], freq_y[y_to_keep[0]]
+    # Add axis labels and title
+    plt.xlabel('x freq. (cycles/pix.)', fontsize=16)
+    plt.ylabel('y freq. (cycles/pix.)', fontsize=16)
+
+    # Add colorbar with vertical label
+    cbar = plt.colorbar(label=r'$log(\hat{I}+1)$', pad=0.02)
+    cbar.ax.set_ylabel(r'$log(\hat{I}+1)$', rotation=90, labelpad=15, fontsize=16)
+    cbar.ax.tick_params(labelsize=14)
+
+    # Customize ticks
+    plt.xticks(np.arange(-.1, .15, 0.05), fontsize=14)
+    plt.yticks(fontsize=14)
+
+    # FFT with masking rectangles shown
+    bottom_left_pz1 = [freq_y_grid_shifted[b_pz1 - height//2][0], freq_x_grid_shifted[0][l_pz1  + width//2]]
+    bottom_left_pz2 = [freq_y_grid_shifted[b_pz2 + height//2][0], freq_x_grid_shifted[0][l_pz2 - width//2]]
+    bottom_left_pp1 = [freq_y_grid_shifted[b_pp1 - height//2][0], freq_x_grid_shifted[0][l_pp1 + width//2]]
+    bottom_left_pp2 =  [freq_y_grid_shifted[b_pp2 + height//2][0], freq_x_grid_shifted[0][l_pp2 - width//2]]
+    bottom_left_pm1 = [freq_y_grid_shifted[b_pm1 - height//2][0], freq_x_grid_shifted[0][l_pm1 + width//2]]
+    bottom_left_pm2 = [freq_y_grid_shifted[b_pm2 + height//2][0], freq_x_grid_shifted[0][l_pm2 - width//2]]
+
+    bottom_lefts = np.array([bottom_left_pz1, bottom_left_pz2, bottom_left_pp1, bottom_left_pp2, bottom_left_pm1, bottom_left_pm2])
+    bottom_lefts = np.array([bl[::-1] for bl in bottom_lefts])
+    
+    widths = ((np.max(freq_x) - np.min(freq_x))/width) * np.array([(r_pz1 - l_pz1), (r_pz2 - l_pz2), (r_pp1 - l_pp1), (r_pp2 - l_pp2), (r_pm1 - l_pm1), (r_pm2 - l_pm2)])
+    heights = ((np.max(freq_y) - np.min(freq_y))/height) * np.array([(t_pz1 - b_pz1), (t_pz2 - b_pz2), (t_pp1 - b_pp1), (t_pp2 - b_pp2), (t_pm1 - b_pm1), (t_pm2 - b_pm2)])
+
+    rectangles = []
+    for i in range(len(widths)):
+        rectangle = patches.Rectangle((bottom_lefts[i]),  widths[i],  heights[i],  edgecolor='red', facecolor='none', linewidth=1)
+        rectangles.append(rectangle)
+    
+
+    for i in range(len(rectangles)):
+        plt.gca().add_patch(rectangles[i])
+
+    # Set axis limits
+    plt.xlim(-0.13, 0.13) 
+    plt.ylim(-0.08, 0.08)
+
+    plt.tight_layout()
 
 def plot_all_thetas(theta_out_1_pp, theta_out_1_pm, theta_out_1_arith, theta_out_2, edge_cols, edge_rows):
 
@@ -1513,28 +1791,35 @@ def plot_all_thetas(theta_out_1_pp, theta_out_1_pm, theta_out_1_arith, theta_out
     plt.title(r'$\theta$ using $(4|A(+,+)||A(+,-)|)/|A(+,0)|^2$')
     plt.colorbar()
 
-def contour_plot(theta, circle_center, R):
+def contour_plot(theta, circle_center, R, crop_image, input_angle):
 
-    x_min = int(circle_center[1] - R / np.sqrt(2))
-    x_max = int(circle_center[1] + R / np.sqrt(2))
+    if crop_image == 'No':
+        x_min = int(circle_center[1] - R / np.sqrt(2))
+        x_max = int(circle_center[1] + R / np.sqrt(2))
 
-    x = np.arange(x_min, x_max, 1)
+        x = np.arange(x_min, x_max, 1)
 
-    y_min = int(circle_center[0] - R / np.sqrt(2))
-    y_max = int(circle_center[0] + R / np.sqrt(2))
+        y_min = int(circle_center[0] - R / np.sqrt(2))
+        y_max = int(circle_center[0] + R / np.sqrt(2))
 
-    y = np.arange(y_min, y_max, 1)
+        y = np.arange(y_min, y_max, 1)
 
-    X, Y = np.meshgrid(x, y)
+        X, Y = np.meshgrid(x, y)
+
+        offset_angle = np.rad2deg(theta)-input_angle
+        
+        contour = plt.contourf(X, Y, offset_angle[y_min:y_max, x_min:x_max], levels=20)
     
-    contour = plt.contourf(X, Y, np.rad2deg(theta)[y_min:y_max, x_min:x_max], levels=20)
+    elif crop_image == 'Yes':
+        contour = plt.contourf(np.rad2deg(theta), levels=20)
+
     plt.xlabel('x pixel')
     plt.ylabel('y pixel')
     
     cbar = plt.colorbar(contour)
     cbar.set_label('Offset angle (degrees)')  # Adding label to the colorbar
 
-def plot_theta_central_row(to_keep, width, edge_circ_cols, angle_name, thetas, theta_calibrated, radius_of_circle, circle_center):
+def plot_theta_central_row(width, angle_name, thetas, theta_calibrated, radius_of_circle, circle_center, cols_lim):
 
     plt.close()
 
@@ -1554,8 +1839,8 @@ def plot_theta_central_row(to_keep, width, edge_circ_cols, angle_name, thetas, t
     rows_to_plot = [int(radius_of_circle*(2*rows_to_plot_prop[0]-1) + circle_center[0]), int(radius_of_circle*(2*rows_to_plot_prop[1]-1) + circle_center[0])]
     distance_to_edge_circle_from_center = [np.sqrt(np.abs(1-4*rows_to_plot_prop[0]**2))*radius_of_circle, np.sqrt(np.abs(1-4*rows_to_plot_prop[1]**2))*radius_of_circle]
 
-    theta_min_plot = 0 # np.min(np.rad2deg(theta_calibrated[circle_center[0]-R:circle_center[0]+R, :]))
-    theta_max_plot = 50 # np.max(np.rad2deg(theta_out_1_arith[circle_center[0]-R:circle_center[0]+R, :]))
+    theta_min_plot = -150
+    theta_max_plot = 150
 
     # plt.plot(x, np.rad2deg(theta_out_1_pp[height//2, :]), label=fr'$\theta_1pp$')
     # plt.plot(x, np.rad2deg(theta_out_1_pm[height//2, :]), label=fr'$\theta_1pm$')
@@ -1573,11 +1858,17 @@ def plot_theta_central_row(to_keep, width, edge_circ_cols, angle_name, thetas, t
     plt.plot(x, theta_calibrated[rows_to_plot[0], :], label=fr'Calibrated $\theta$ ({rows_to_plot_prop[0]}D)', linestyle='--', color='green')
     plt.plot(x, theta_calibrated[rows_to_plot[1], :], label=fr'Calibrated $\theta$ ({rows_to_plot_prop[1]}D)', linestyle='--', color='orange')
 
-    plt.plot([circle_center[1]-radius_of_circle, circle_center[1]-radius_of_circle], [theta_min_plot, theta_max_plot], linestyle='-', color='black', label='Edge of circle')
-    plt.plot([circle_center[1]+radius_of_circle, circle_center[1]+radius_of_circle], [theta_min_plot, theta_max_plot], linestyle='-', color='black')
+    # plt.plot([circle_center[1]-radius_of_circle, circle_center[1]-radius_of_circle], [theta_min_plot, theta_max_plot], linestyle='-', color='black', label='Edge of circle')
+    # plt.plot([circle_center[1]+radius_of_circle, circle_center[1]+radius_of_circle], [theta_min_plot, theta_max_plot], linestyle='-', color='black')
 
-    plt.plot([circle_center[1]+distance_to_edge_circle_from_center[0], circle_center[1]+distance_to_edge_circle_from_center[0]], [theta_min_plot, theta_max_plot], linestyle='-', color='gray', label='Edge of circle (for 0.25/0.75 D)')
-    plt.plot([circle_center[1]-distance_to_edge_circle_from_center[0], circle_center[1]-distance_to_edge_circle_from_center[0]], [theta_min_plot, theta_max_plot], linestyle='-', color='gray')
+    # plt.plot([circle_center[1]+distance_to_edge_circle_from_center[0], circle_center[1]+distance_to_edge_circle_from_center[0]], [theta_min_plot, theta_max_plot], linestyle='-', color='gray', label='Edge of circle (for 0.25/0.75 D)')
+    # plt.plot([circle_center[1]-distance_to_edge_circle_from_center[0], circle_center[1]-distance_to_edge_circle_from_center[0]], [theta_min_plot, theta_max_plot], linestyle='-', color='gray')
+
+    plt.plot([cols_lim[0], cols_lim[0]], [theta_min_plot, theta_max_plot], linestyle='-', color='black', label='Interpolation limit')
+    plt.plot([cols_lim[1], cols_lim[1]], [theta_min_plot, theta_max_plot], linestyle='-', color='black')
+
+    # plt.plot([circle_center[1]+distance_to_edge_circle_from_center[0], circle_center[1]+distance_to_edge_circle_from_center[0]], [theta_min_plot, theta_max_plot], linestyle='-', color='gray', label='Edge of circle (for 0.25/0.75 D)')
+    # plt.plot([circle_center[1]-distance_to_edge_circle_from_center[0], circle_center[1]-distance_to_edge_circle_from_center[0]], [theta_min_plot, theta_max_plot], linestyle='-', color='gray')
 
     plt.xlabel('x pixel')
     plt.ylabel('Angle (degrees)')
@@ -1587,7 +1878,7 @@ def plot_theta_central_row(to_keep, width, edge_circ_cols, angle_name, thetas, t
     plt.xlim([circle_center[1]-R-100, circle_center[1]+R+100])
 
 
-def plot_theta_cols(height, theta_calibrated, angle_name, thetas, radius_of_circle, circle_center):
+def plot_theta_cols(height, theta_calibrated, angle_name, thetas, radius_of_circle, circle_center, rows_lim):
 
     plt.close()
 
@@ -1601,8 +1892,8 @@ def plot_theta_cols(height, theta_calibrated, angle_name, thetas, radius_of_circ
     cols_to_plot = [int(radius_of_circle*(2*cols_to_plot_prop[0]-1) + circle_center[1]), int(radius_of_circle*(2*cols_to_plot_prop[1]-1) + circle_center[1])]
     distance_to_edge_circle_from_center = [np.sqrt(np.abs(1-4*cols_to_plot_prop[0]**2))*radius_of_circle, np.sqrt(np.abs(1-4*cols_to_plot_prop[1]**2))*radius_of_circle]
     
-    theta_min_plot = 0 #np.min(np.rad2deg(theta_calibrated[:, circle_center[1]-R:circle_center[1]+R]))
-    theta_max_plot = 50 #np.max(np.rad2deg(theta_out_1_arith[:, circle_center[1]-R:circle_center[1]+R]))
+    theta_min_plot = -150
+    theta_max_plot = 150
     
     plt.plot([y[0], y[-1]], [angle_name-154.5, angle_name-154.5], label='Input', color='red')
     
@@ -1614,38 +1905,48 @@ def plot_theta_cols(height, theta_calibrated, angle_name, thetas, radius_of_circ
     plt.plot(y, theta_calibrated[:, cols_to_plot[0]], label=fr'Calibrated $\theta$ ({cols_to_plot_prop[0]}D)', linestyle='--', color='green')
     plt.plot(y, theta_calibrated[:, cols_to_plot[1]], label=fr'Calibrated $\theta$ ({cols_to_plot_prop[1]}D)', linestyle='--', color='orange')
     
-    plt.plot([circle_center[0]-radius_of_circle, circle_center[0]-radius_of_circle], [theta_min_plot, theta_max_plot], linestyle='-', color='black', label='Edge of circle')
-    plt.plot([circle_center[0]+radius_of_circle, circle_center[0]+radius_of_circle], [theta_min_plot, theta_max_plot], linestyle='-', color='black')
+    # plt.plot([circle_center[0]-radius_of_circle, circle_center[0]-radius_of_circle], [theta_min_plot, theta_max_plot], linestyle='-', color='black', label='Edge of circle')
+    # plt.plot([circle_center[0]+radius_of_circle, circle_center[0]+radius_of_circle], [theta_min_plot, theta_max_plot], linestyle='-', color='black')
 
-    plt.plot([circle_center[0]+distance_to_edge_circle_from_center[0], circle_center[0]+distance_to_edge_circle_from_center[0]], [theta_min_plot, theta_max_plot], linestyle='-', color='gray')
-    plt.plot([circle_center[0]-distance_to_edge_circle_from_center[0], circle_center[0]-distance_to_edge_circle_from_center[0]], [theta_min_plot, theta_max_plot], linestyle='-', color='gray', label='Edge of circle (for 0.25/0.75 D)')
+    # plt.plot([circle_center[0]+distance_to_edge_circle_from_center[0], circle_center[0]+distance_to_edge_circle_from_center[0]], [theta_min_plot, theta_max_plot], linestyle='-', color='gray')
+    # plt.plot([circle_center[0]-distance_to_edge_circle_from_center[0], circle_center[0]-distance_to_edge_circle_from_center[0]], [theta_min_plot, theta_max_plot], linestyle='-', color='gray', label='Edge of circle (for 0.25/0.75 D)')
+
+    plt.plot([rows_lim[0], rows_lim[0]], [theta_min_plot, theta_max_plot], linestyle='-', color='black', label='Interpolation limit')
+    plt.plot([rows_lim[1], rows_lim[1]], [theta_min_plot, theta_max_plot], linestyle='-', color='black')
 
     plt.xlabel('y pixel')
     plt.ylabel('Angle (degrees)')
     plt.title('Column lineouts (uncalibrated and calibrated)')
     plt.legend()
-    # plt.ylim([angle_name-154.5-5, angle_name-154.5+10])
+    plt.ylim([angle_name-154.5-10, angle_name-154.5+10])
     # plt.xlim([circle_center[0]-R-100, circle_center[0]+R+100])
 
 
-def plot_calibrated_angle(theta, circle_center, R):
-
-    x_min = int(circle_center[1]-R/np.sqrt(2))
-    x_max = int(circle_center[1]+R/np.sqrt(2))
-
-    y_min = int(circle_center[0]-R/np.sqrt(2))
-    y_max = int(circle_center[0]+R/np.sqrt(2))
-
+def plot_calibrated_angle(theta, circle_center, R, crop_image):
 
     plt.imshow(theta, origin='lower') # extent=(x_min, x_max, y_min, y_max)
-    plt.title('Calibrated angle')
-    plt.colorbar()
 
-    # Add a rectangle
-    ax = plt.gca()
-    rect = patches.Rectangle((x_min, y_min), x_max - x_min, y_max - y_min,
-                             linewidth=2, edgecolor='red', facecolor='none')
-    ax.add_patch(rect)
+    if crop_image == 'No':
+        x_min = int(circle_center[1]-R/np.sqrt(2))
+        x_max = int(circle_center[1]+R/np.sqrt(2))
+
+        y_min = int(circle_center[0]-R/np.sqrt(2))
+        y_max = int(circle_center[0]+R/np.sqrt(2))
+
+        # Add a rectangle
+        ax = plt.gca()
+        rect = patches.Rectangle((x_min, y_min), x_max - x_min, y_max - y_min,
+                                linewidth=2, edgecolor='red', facecolor='none')
+        ax.add_patch(rect)
+
+
+    
+    plt.title('Calibrated angle with interpolation limits (red)')
+    # Add colorbar with label
+    cbar = plt.colorbar()
+    cbar.set_label('Angle (degrees)')
+
+    
 
 
 def cosine_1d(x_coord, y_constant, A, B, C, kx, ky, phi, D):
@@ -1694,7 +1995,7 @@ def find_center(raw_image, width, height):
     center_row = int(x0_fit_row)
 
     center_point = [center_row, center_col]
-    print(f'Centre point: {center_point[0]}, {center_point[1]}')
+    print(f'Centre point (r, c): ({center_point[0]}, {center_point[1]})')
 
     x_data = [x_data_row, x_data_col]
     y_data = [y_data_row, y_data_col]
@@ -1704,7 +2005,9 @@ def find_center(raw_image, width, height):
     b_fit = [b_fit_row, b_fit_col]
     p_fit = [p_fit_row, p_fit_col]
 
-    return center_point, y_data, x_data, a_fit, x0_fit, sigma_fit, b_fit, p_fit
+    params = [params_row, params_col]
+
+    return center_point, y_data, x_data, params
 
 def gaussian(x, a, x0, sigma, b, p):
     """
@@ -1725,7 +2028,9 @@ def gaussian(x, a, x0, sigma, b, p):
     base = np.abs(x - x0) ** p  # Ensure valid exponentiation
     return b + (a * np.exp(-base / (sigma ** p)))
 
-def plot_gaussian(x_data, y_data, a_fit, x0_fit, sigma_fit, b_fit, p_fit, label, title):
+def plot_gaussian(x_data, y_data, params, label, title):
+
+    a_fit, x0_fit, sigma_fit, b_fit, p_fit = params
     
     y_fit = gaussian(x_data, a_fit, x0_fit, sigma_fit, b_fit, p_fit)
 
@@ -1738,40 +2043,88 @@ def plot_gaussian(x_data, y_data, a_fit, x0_fit, sigma_fit, b_fit, p_fit, label,
     plt.legend()
     plt.grid()
 
-def find_edge_of_circle(arr, threshold_ratio):
-    """
-    Find the first index where the array exceeds a threshold proportion 
-    of its maximum value.
 
-    Parameters:
-        arr (array-like): Input 1D array.
-        threshold_ratio (float): Proportion of the maximum value (0 to 1).
+def find_noise_of_image(mean_columns, raw_image, threshold_for_cum_diff=0.001):
 
-    Returns:
-        int: Index of the first value exceeding the threshold, or -1 if none found.
-    """
-    arr = np.array(arr)  # Convert to NumPy array
-    max_value = np.max(arr)  # Find max value
-    threshold = threshold_ratio * max_value  # Compute proportional threshold
+    mean_columns = np.array(mean_columns)
 
-    indices = np.where(arr > threshold)[0]  # Find indices where condition is met
-    return indices[0] if len(indices) > 0 else -1  # Return first match or -1 if none found
+    # Compute the cumulative moving average (CMA)
+    cumulative_avg = np.cumsum(mean_columns) / np.arange(1, len(mean_columns) + 1)
+
+    print('1')
+    
+    # Compute differences in CMA
+    diff = np.diff(cumulative_avg)  # Difference between consecutive elements in CMA
+    print('2')
+    index_at_increase = np.where(diff > threshold_for_cum_diff)[0][0]
+    print('3')
+    noise_image = np.mean(raw_image[:, 0:index_at_increase])
+    noise_image_std = np.std(raw_image[:, 0:index_at_increase])
+
+    return noise_image, noise_image_std
 
 
-def line_of_best_fit(x_data, y_data, xmin, xmax):
+def find_edge_of_circle_spline(mean_col_arr, mean_row_arr, width, height, circle_center, gradient_threshold, s):
 
-    if len(x_data) != len(y_data):
-        raise ValueError('Warning! Length of xdata and ydata not equal.')
+    mean_col_arr = np.array(mean_col_arr)  # Convert to NumPy array
+    mean_row_arr = np.array(mean_row_arr)  # Convert to NumPy array
 
-    x_subset = x_data[xmin:xmax]
-    y_subset = y_data[xmin:xmax]
+    # For cols left side
+    width_l = np.arange(0, circle_center[1], 1)
+    mean_cols_l = mean_col_arr[0:circle_center[1]]
 
-    # Calculate the line of best fit
-    slope, intercept, r_value, *_ = linregress(x_subset, y_subset)  # Degree 1 for a linear fit
-    coefficients = [slope, intercept]
-    r_squared = r_value**2
+    spline_l = UnivariateSpline(width_l, mean_cols_l, s=s)
 
-    return coefficients, r_squared
+    edge_left = np.where(np.gradient(spline_l(width_l)) > gradient_threshold)[0][0]
+
+    # For cols right side
+    width_r = np.arange(circle_center[1], width, 1)
+    mean_cols_r = mean_col_arr[circle_center[1]:width]
+
+    spline_r = UnivariateSpline(width_r, mean_cols_r, s=s)
+
+    edge_right = np.where(np.gradient(spline_r(width_r)) < -gradient_threshold)[0][-1] + circle_center[1]
+
+    # For rows bottom
+    height_b = np.arange(0, circle_center[0], 1)
+    mean_rows_b = mean_row_arr[0:circle_center[0]]
+
+    spline_b = UnivariateSpline(height_b, mean_rows_b, s=s)
+
+    edge_bottom = np.where(np.gradient(spline_b(height_b)) > gradient_threshold)[0][0]
+    
+    # For rows top
+    height_t = np.arange(circle_center[0], height, 1)
+    mean_rows_t = mean_row_arr[circle_center[0]: height]
+
+    spline_t = UnivariateSpline(height_t, mean_rows_t, s=s)
+
+    edge_top = np.where(np.gradient(spline_t(height_t)) < -gradient_threshold)[0][-1] + circle_center[0]
+
+    print('Bottom edge: ', edge_bottom)
+    print('Top edge: ', edge_top)
+    print('Left edge: ', edge_left)
+    print('Right edge: ', edge_right)
+
+    indices_row = [int(edge_bottom), int(edge_top)]
+    indices_col = [int(edge_left), int(edge_right)]
+
+    # plt.subplot(2,2,1)
+    # plt.plot(spline_l(width_l))
+    # plt.subplot(2,2,2)
+    # plt.plot(spline_r(width_r))
+    # plt.subplot(2,2,3)
+    # plt.plot(spline_t(height_t))
+    # plt.subplot(2,2,3)
+    # plt.plot(spline_b(height_b))
+
+
+
+    #plt.show()
+
+    
+
+    return indices_row, indices_col
     
 def plane_of_best_fit(x_data, y_data, z_data):
 
@@ -1804,15 +2157,43 @@ def plane_of_best_fit(x_data, y_data, z_data):
 
     return coefficients, R2
 
+def apply_top_hat_image(image, circle_center, width, height):
 
+    if circle_center[0] > height//2 and circle_center[1] > width//2:
+        edge_rows = [2*circle_center[0] - height, height]
+        edge_cols = [2*circle_center[1] - width, width]
+    elif circle_center[0] > height//2 and circle_center[1] <= width//2:
+        edge_rows = [2*circle_center[0] - height, height]
+        edge_cols = [0, 2*circle_center[1]]
+    else:
+        raise(ValueError('write more code'))
+
+    masked_image = np.zeros_like(image)
+    masked_image[edge_rows[0]:edge_rows[1], edge_cols[0]:edge_cols[1]] = image[edge_rows[0]:edge_rows[1], edge_cols[0]:edge_cols[1]]
+
+    return masked_image, edge_rows, edge_cols
+
+# Function to extract diagonal elements in a given direction
+def extract_diagonal(arr, start_row, start_col, step_r, step_c):
+    """Extract elements along a custom diagonal direction."""
+    rows, cols = arr.shape
+    diagonal_elements = []
+    
+    r, c = start_row, start_col
+    while r < rows and c < cols:
+        diagonal_elements.append(arr[r, c])
+        r += step_r  # Move 2 rows down
+        c += step_c  # Move 1 column right
+    
+    return diagonal_elements
 
 ## RUN CODE ##
 
 if __name__ == '__main__':
 
-    folderpath = '/home/sfv514/Documents/Project/Camera/Saved Images/28-01-25/Full system with hwp/'
+    folderpath = '/home/sfv514/Documents/Project/Camera/Saved Images/21-02-25/Full calibration - coffin/'
 
-    filename = 'Acquisition_113537'
+    filename = 'Acquisition_135529' # 131157 131232 131251 131315 131335 131356 131416 131447 131511 
 
     filepath = f'{folderpath}{filename}.raw'
 
@@ -1826,9 +2207,11 @@ if __name__ == '__main__':
 
     a = 1920/1200
 
+    pixel_size = 5.86e-6
+
     ## User settings
 
-    rotated_system = 'No'
+    rotated_system = 'Yes'
 
     if rotated_system == 'Yes':
         angle_name = angle_name - 45
@@ -1838,13 +2221,15 @@ if __name__ == '__main__':
         print(f'Input angle: {angle_name-154.5}°')
     
 
-
     ## Pre-processing
     # Choose whether to crop the image
     crop_raw_image = 'No'
     # If cropping, choose shape. Rectangle or square. Rectangle retains original aspect ratio
     crop_shape = 'square'
     # Choose whether to apply a gaussian window and sigma to (cropped) image
+
+    image_top_hat = 'Yes'
+
     image_gaussian = 'No'
     sigma = 2
     # Choose whether to apply a hanning window to (cropped) image
@@ -1858,22 +2243,40 @@ if __name__ == '__main__':
     # Select method of amplitude finding
     method = 'hilbert'
     # Choose whether to apply a hanning window to the masked FFTs
-    fft_hanning = 'Yes'
+    fft_window = 'hanning'
+    alpha = 1 # for tukey window. 1 returns Hann window, 0 returns top hat.
+
+    # Old method
+    n_stds = 110
+    n_stds_pz = 5
+
     # Choose whether to add a Gaussian window to the IFFTs before applying Hilbert transform
     gaussian_pre_smoothing = 'No'
     median_post_smoothing = 'No'
 
+    global_calibration = 'No'
+
     plot_label = ''
 
-    raw_image = read_image(filepath=filepath, width=width_original, height=height_original)
 
+    ## START OF CODE ##
+
+    raw_image = read_image(filepath=filepath, width=width_original, height=height_original)
+    
     original_image = raw_image
 
-    circle_center, y_data, x_data, a_fit, x0_fit, sigma_fit, b_fit, p_fit = find_center(raw_image=raw_image, width=width_original, height=height_original)
+    circle_center, y_data, x_data, params = find_center(raw_image=raw_image, width=width_original, height=height_original)
 
-    edge_of_circle = find_edge_of_circle(y_data[1], 0.18) # 0.28
+    # noise_image, noise_image_std = find_noise_of_image(y_data[1], raw_image=original_image)
+    
+    # print('Image noise: ', noise_image)
+    # print('Image noise std: ', noise_image_std)
+    
+    #edge_of_circle_cols, edge_of_circle_rows = find_edge_of_circle(y_data[1], y_data[0], threshold=8, width=width_original, height=height_original, circle_center=circle_center)
+    #edge_of_circle_cols, edge_of_circle_rows = find_edge_of_circle_cubic(y_data[1], y_data[0], width=width_original, height=height_original, circle_center=circle_center)
+    edge_of_circle_rows, edge_of_circle_cols = find_edge_of_circle_spline(y_data[1], y_data[0], width=width_original, height=height_original, circle_center=circle_center, gradient_threshold=0.01, s=4)#noise_image + 3*noise_image_std) # 0.28
 
-    R = circle_center[1]-edge_of_circle
+    R = round(np.min([circle_center[1]-edge_of_circle_cols[0], edge_of_circle_cols[1] - circle_center[1], circle_center[0] - edge_of_circle_rows[0], edge_of_circle_rows[1] - circle_center[0]]))
     print(f'Radius of circle: {R} pix.')
 
 
@@ -1883,11 +2286,6 @@ if __name__ == '__main__':
         elif crop_shape == 'square':
             rows_rectangle, cols_rectangle, raw_image_cropped = crop_into_square(R=R, circle_center=circle_center, raw_image=raw_image)
 
-        edge_circ_rows = rows_rectangle
-        edge_circ_cols = cols_rectangle
-
-        edge_circ_rows_original = edge_circ_rows
-        edge_circ_cols_original = edge_circ_cols
         raw_image = raw_image_cropped
         width = np.shape(raw_image)[1]
         height = np.shape(raw_image)[0]
@@ -1899,29 +2297,30 @@ if __name__ == '__main__':
 
         cols_rectangle = [0, width]
         rows_rectangle = [0, height]
+    
+    if image_top_hat == 'Yes':
+        # Hanning window should extend all the way to the closest edges (row/column) from the center to preserve as much data as possible. 
+        # The rest of the image should be zero ('top hat').
+        raw_image, edge_rows_hann, edge_cols_hann = apply_top_hat_image(raw_image, circle_center=circle_center, width=width, height=height)
 
-        edge_circ_rows = rows_rectangle
-        edge_circ_cols = cols_rectangle
+        print('Hanning window limits (columns): ', edge_cols_hann)
+        print('Hanning window limits (rows): ', edge_rows_hann)
 
+        raw_image = apply_hanning_window_to_image(raw_image, rows_for_window=edge_rows_hann, cols_for_window=edge_cols_hann)
+        print('Top hat and Hanning applied to image')
+    
     if image_gaussian == 'Yes':
         raw_image = apply_gaussian_window_to_image(raw_image, sigma)
-    
-    if image_hanning == 'Yes':
-        raw_image = apply_hanning_window_to_image(raw_image)
 
     if add_padding_to_image == 'Yes':
         raw_image, height, width, row_pad, col_pad = pad_image(image=raw_image, percentage_of_pad=percentage_of_pad)
-        edge_circ_cols = np.array(edge_circ_cols) + col_pad
-        edge_circ_rows = np.array(edge_circ_rows) + row_pad
+        edge_of_circle_cols = np.array(edge_of_circle_cols) + col_pad
+        edge_of_circle_rows = np.array(edge_of_circle_rows) + row_pad
 
     fft_image, abs_fft, noise_floor, noise_std, *_ = fft_2d(raw_image, width, height)
 
-    print('Noise:', noise_floor)
-    print('Noise std: ', noise_std)
-
-    # Thresholds for window edges around FFT components
-    threshold = noise_floor + 80*noise_std
-    threshold_pz = noise_floor + 20*noise_std
+    print('FFT noise:', noise_floor)
+    print('FFT noise std: ', noise_std)
 
     if rotated_system == 'Yes':
 
@@ -1929,9 +2328,10 @@ if __name__ == '__main__':
 
         all_bright_spot_coords = find_peaks_fft_45(abs_fft, width, height)
 
-        edge_coords = calculate_edges_45(abs_fft, threshold=threshold, threshold_pz=threshold_pz, all_bright_spot_coords=all_bright_spot_coords, height=height)
+        #edge_coords = calculate_edges_45(abs_fft, threshold=threshold, threshold_pz=threshold_pz, all_bright_spot_coords=all_bright_spot_coords, height=height)
+        edge_coords = calculate_edges_45_grad(image=median_filter(abs_fft, size=3), all_bright_spot_coords=all_bright_spot_coords, height=height)
 
-        mask_pz, mask_pp, mask_pm = define_masks_45(fft_hanning, edge_coords, height=height, width=width)
+        mask_pz, mask_pp, mask_pm = define_masks_45(fft_window=fft_window, edge_coords=edge_coords, height=height, width=width, alpha=alpha)
 
         print(f"Coords_PZ1: {all_bright_spot_coords[0]}")
         print(f"Coords_PZ2: {all_bright_spot_coords[1]}")
@@ -1939,6 +2339,7 @@ if __name__ == '__main__':
         print(f"Coords_PP2: {all_bright_spot_coords[3]}")
         print(f"Coords_PM1: {all_bright_spot_coords[4]}")
         print(f"Coords_PM2: {all_bright_spot_coords[5]}")
+
 
     elif rotated_system == 'No':
 
@@ -1948,7 +2349,7 @@ if __name__ == '__main__':
 
         edge_coords = calculate_edges(abs_fft, threshold=threshold, threshold_pz=threshold_pz, all_bright_spot_coords=all_bright_spot_coords, height=height)
 
-        mask_pz, mask_pp, mask_pm = define_masks(fft_hanning, edge_coords, height=height, width=width)
+        mask_pz, mask_pp, mask_pm = define_masks(fft_window=fft_window, edge_coords=edge_coords, height=height, width=width, alpha=alpha)
 
         print(f"Coords_PZ1: {all_bright_spot_coords[0]}")
         print(f"Coords_PZ2: {all_bright_spot_coords[1]}")
@@ -2005,79 +2406,109 @@ if __name__ == '__main__':
     theta_out_2 = thetas[3]
     
     # Divide by sqrt(2) to define maximum square inside circle
-    x_edge_of_circ = [int(circle_center[1]-R/np.sqrt(2)), int(circle_center[1]+R/np.sqrt(2))]
-    y_edge_of_circ = [int(circle_center[0]-R/np.sqrt(2)), int(circle_center[0]+R/np.sqrt(2))]
+    cols_interp_lim = [int(circle_center[1]-R/np.sqrt(2)), int(circle_center[1]+R/np.sqrt(2))]
+    rows_interp_lim = [int(circle_center[0]-R/np.sqrt(2)), int(circle_center[0]+R/np.sqrt(2))]
+
+    print('Columns for interpolation limits: ', cols_interp_lim)
+    print('Rows for interpolation limits: ', rows_interp_lim)
     
-    xmin = x_edge_of_circ[0]
-    xmax = x_edge_of_circ[1]
-
-    ymin = y_edge_of_circ[0]
-    ymax = y_edge_of_circ[1]
-
-    theta_min = np.rad2deg(theta_out_arith[circle_center[0], xmax])
-    theta_max = np.rad2deg(theta_out_arith[circle_center[0], xmin])
-
-    fit_coefficients_x, r_squared_x = line_of_best_fit(np.arange(0, width, 1), np.rad2deg(theta_out_arith[circle_center[0], :]), xmin=xmin, xmax=xmax)
     
-    fit_coefficients_y, r_squared_y = line_of_best_fit(np.arange(0, height, 1), np.rad2deg(theta_out_arith[:,circle_center[1]]), xmin=ymin, xmax=ymax)
+    col_min = cols_interp_lim[0]
+    col_max = cols_interp_lim[1]
 
-    coefficients, r_squared = plane_of_best_fit(x_data=np.arange(0, width, 1)[xmin:xmax], y_data=np.arange(0, height, 1)[ymin:ymax], z_data=np.rad2deg(theta_out_arith)[ymin:ymax,xmin:xmax])
+    row_min = rows_interp_lim[0]
+    row_max = rows_interp_lim[1]
+
+    xmin = (col_min - width//2)*pixel_size
+    xmax = (col_max - width//2)*pixel_size
+
+    ymin = (row_min - height//2)*pixel_size
+    ymax = (row_max - height//2)*pixel_size
+
     
-    x_values = np.arange(0, width, 1)
-    y_values = np.arange(0, height, 1)
+    x_values = pixel_size*np.arange(-width//2, width//2, 1)
+    y_values = pixel_size*np.arange(-height//2, height//2, 1)
 
     X, Y = np.meshgrid(x_values, y_values)
-
-    calibration_function = coefficients[0]*X + coefficients[1]*Y + coefficients[2] - (angle_name-154.5)
-
-    global_calibration = 'No'
 
     if global_calibration == 'Yes':
         print('### Using global calibration ###')
         calibration_function = -0.00280*X + 0.00283*Y + 2.930
-    
-    theta_calib = np.rad2deg(theta_out_arith) - calibration_function
+        calibration_function = -0.00274*X + 0.00350*Y + 2.64
+        calibration_function = 0.000366*X + 0.00419*Y - 1.291 # 11-2-25
+        calibration_function = 6.16678529e+01*X + 7.17400656e+02*Y + 1.33225570 # 13-2-25, theta coeffs includeds afterwards for dimension compatability
+
+        coefficients = [-1.04898391e-03,  4.21341916e-02,  7.17400656e+02,  6.16678529e+01, 1.33225570e+00]
+        coefficients = [-1.75495604e-03,  7.80860530e-02,  7.77445127e+02,  1.16440498e+02, 1.77009372e+00] # 21/2 coffin calibration
+
+        if angle_name - 154.5 < 45:
+            offset_theta = coefficients[0]*np.rad2deg(theta_out_arith)**2 + coefficients[1]*np.rad2deg(theta_out_arith) + coefficients[2]*Y + coefficients[3]*X + coefficients[4]
+        else:
+            offset_theta = coefficients[0]*(np.rad2deg(theta_out_arith))**2 + coefficients[1]*(np.rad2deg(theta_out_arith)) + coefficients[2]*Y + coefficients[3]*X + coefficients[4]
+        # Print the plane equation
+        print(fr'Calibration function = {coefficients[3]:.2f}x + {coefficients[2]:.2f}y + {coefficients[0]:.5f}*theta^2 + {coefficients[1]:.5f}*theta + {coefficients[4]:.2f}')
+
+        if angle_name - 154.5 < 45:
+            theta_calib = np.rad2deg(theta_out_arith) - offset_theta
+        else:
+            print('1')
+            theta_calib = np.rad2deg(theta_out_arith) + offset_theta
+
+        print(f'Calibrated central theta (global) = {theta_calib[height//2, width//2] :.3f}°')
+    elif global_calibration == 'No':
+        # Fitting 
+        coefficients, r_squared = plane_of_best_fit(x_data=np.arange(xmin, xmax, pixel_size), y_data=np.arange(ymin, ymax, pixel_size), 
+                                                z_data=np.rad2deg(theta_out_arith)[row_min:row_max,col_min:col_max] - (angle_name-154.5))
+        calibration_function = coefficients[0]*X + coefficients[1]*Y + coefficients[2] 
+        theta_calib = np.rad2deg(theta_out_arith) - calibration_function
+        print(f'Calibrated central theta (local) = {theta_calib[height//2, width//2] :.3f}°')
+        print(fr'Calibration function = {coefficients[0]:.2f}x + {coefficients[1]:.2f}y + {coefficients[2]:.2f}')
+        print(coefficients[0])
+        print(coefficients[1])
+        print(coefficients[2])
+        print(r_squared)
+
 
     
+    
+    # np.save(f'/home/sfv514/Documents/Project/Camera/Python_JF/FFT of raw image/Calibrated theta arrays/Coffin calibration/{int(10*(angle_name-154.5))}.npy', theta_out_arith[row_min:row_max, col_min:col_max])  # Save as a .npy file
+    # np.savez(f'/home/sfv514/Documents/Project/Camera/Python_JF/FFT of raw image/Calibrated theta arrays/Coffin calibration/xy{int(10*(angle_name-154.5))}.npz', x=np.arange(0, width, 1)[col_min:col_max], y=np.arange(0, height, 1)[row_min:row_max])  # Save as a .npy file
 
 
-    # Print the plane equation
-    print(f"Plane equation: z = {coefficients[0]:.5f}x + {coefficients[1]:.5f}y + {coefficients[2]:.5f}")
-    print(coefficients[0])
-    print(coefficients[1])
-    print(coefficients[2]-(angle_name-154.5))
-    print(r_squared)
 
-    labels=['Mean value of row', 'Mean value of col.']
-    titles = ['Fit for mean row values', 'Fit for mean col. values']
-    for i in range (2):
-        plt.subplot(1,2,i+1)
-        plot_gaussian(x_data[i], y_data[i], a_fit[i], x0_fit[i], sigma_fit[i], b_fit[i], p_fit[i], labels[i], titles[i])
-    plt.show()
+    # labels=['Mean value of row', 'Mean value of col.']
+    # titles = ['Fit for mean row values', 'Fit for mean col. values']
+    # # Create subplots
+    # plt.figure(figsize=(10, 5))
+    # for i in range(2):
+    #     plt.subplot(1, 2, i + 1)
+    #     plot_gaussian(x_data[i], y_data[i], params[i], labels[i], titles[i])
 
+    # plt.tight_layout()  # Adjust layout for better spacing
+    # plt.show()
+    
     if crop_raw_image == 'Yes':
         if image_hanning == 'Yes':
             plt.subplot(1,2,1)
-            plot_image_with_crop(original_image, rows_rectangle=edge_circ_rows_original, cols_rectangle=edge_circ_cols_original)
+            plot_image_with_crop(original_image, rows_rectangle=edge_of_circle_rows, cols_rectangle=edge_of_circle_cols)
             plt.title('Original Image')
             plt.subplot(1,2,2)
             plt.title('Cropped image with Hanning window applied')
             plt.imshow(raw_image, origin='lower')
         elif image_hanning == 'No':
             plt.subplot(1,2,1)
-            plot_image_with_crop(original_image, rows_rectangle=edge_circ_rows_original, cols_rectangle=edge_circ_cols_original)
+            plot_image_with_crop(original_image, rows_rectangle=edge_of_circle_rows, cols_rectangle=edge_of_circle_cols)
             plt.title('Image with cropping (no Hanning)')
             plt.subplot(1,2,2)
             plt.imshow(raw_image, origin='lower')
             plt.title('Cropped image with padding applied (if any)')
     
     elif crop_raw_image == 'No':
-        if image_hanning == 'Yes':
-            plt.subplot(1,2,1)
-            plot_image(original_image)
-            plt.subplot(1,2,2)
-            plot_image_with_circle_boundary(raw_image, circle_center=circle_center, radius=R)
-            plt.title('Hannning window applied and biundaries of fringes defined')
+        plt.subplot(1,2,1)
+        plot_image_with_circle_boundary(original_image, circle_center=circle_center, radius=R)
+        plt.subplot(1,2,2)
+        plot_image(raw_image)
+        plt.title('Calculated boundaries of fringes shown')
     
     plt.show()
     
@@ -2085,69 +2516,69 @@ if __name__ == '__main__':
         plot_fft_45(fft_image=fft_image, edge_coords=edge_coords)
         plt.show()
 
-        plt.imshow(np.log(fftshift(abs_fft)+1), origin='lower')
+        plot_shifted_fft_with_windows_45(abs_fft_shifted=fftshift(abs_fft), width=width, height=height, edge_coords=edge_coords)
         plt.show()
+
 
     elif rotated_system == 'No':
 
         plot_fft(fft_image=fft_image, edge_coords=edge_coords)
         plt.show()
-        # plot_shifted_fft(to_keep=0.3, fft_image=fft_image, width=width, height=height)
-        # plt.show()
+        plot_shifted_fft(to_keep=0.3, fft_image=fft_image, width=width, height=height)
+        plt.show()
+        
         plot_shifted_fft_with_windows(abs_fft_shifted=fftshift(abs_fft), width=width, height=height, edge_coords=edge_coords)
         plt.show()
-    
-    
-    plot_masked_fft(masked_fft_pz, masked_fft_pp, masked_fft_pm)
-    plt.show()
-    
-    plotting_hilbert(original_function=ifft_pz, hilbert_amplitude=A_pz, function_name='+0', cols_for_lineout=cols_for_lineout, rows_for_lineout=rows_for_lineout)
-    plt.show()
-    plotting_hilbert(original_function=ifft_pp, hilbert_amplitude=A_pp, function_name='++', cols_for_lineout=cols_for_lineout, rows_for_lineout=rows_for_lineout)
-    plt.show()
-    plotting_hilbert(original_function=ifft_pm, hilbert_amplitude=A_pm, function_name='+-', cols_for_lineout=cols_for_lineout, rows_for_lineout=rows_for_lineout)
-    plt.show()
-    
-    plt.subplot(2,2,1)
-    plt.title(f'IFFT: +0')
-    plt.imshow(ifft_pz, origin='lower')
-    plt.xlabel('x pixel')
-    plt.ylabel('y pixel')
-    plt.colorbar(label='Intensity')
 
-    plt.subplot(2,2,2)
-    plt.title(f'IFFT: ++')
-    plt.imshow(ifft_pp, origin='lower')
-    plt.xlabel('x pixel')
-    plt.ylabel('y pixel')
-    plt.colorbar(label='Intensity')
+    plt.show()
 
-    plt.subplot(2,2,3)
-    plt.title(f'IFFT: +-')
-    plt.imshow(ifft_pm, origin='lower')
-    plt.xlabel('x pixel')
-    plt.ylabel('y pixel')
-    plt.colorbar(label='Intensity')
+    # plotting_hilbert(original_function=ifft_pz, hilbert_amplitude=A_pz, function_name='+0', cols_for_lineout=cols_for_lineout, rows_for_lineout=rows_for_lineout)
+    # plt.show()
+    # plotting_hilbert(original_function=ifft_pp, hilbert_amplitude=A_pp, function_name='++', cols_for_lineout=cols_for_lineout, rows_for_lineout=rows_for_lineout)
+    # plt.show()
+    # plotting_hilbert(original_function=ifft_pm, hilbert_amplitude=A_pm, function_name='+-', cols_for_lineout=cols_for_lineout, rows_for_lineout=rows_for_lineout)
+    # plt.show()
+    
+    # plt.subplot(2,2,1)
+    # plt.title(f'IFFT: +0')
+    # plt.imshow(ifft_pz, origin='lower')
+    # plt.xlabel('x pixel')
+    # plt.ylabel('y pixel')
+    # plt.colorbar(label='Intensity')
+
+    # plt.subplot(2,2,2)
+    # plt.title(f'IFFT: ++')
+    # plt.imshow(ifft_pp, origin='lower')
+    # plt.xlabel('x pixel')
+    # plt.ylabel('y pixel')
+    # plt.colorbar(label='Intensity')
+
+    # plt.subplot(2,2,3)
+    # plt.title(f'IFFT: +-')
+    # plt.imshow(ifft_pm, origin='lower')
+    # plt.xlabel('x pixel')
+    # plt.ylabel('y pixel')
+    # plt.colorbar(label='Intensity')
 
 
-    plt.subplot(2,2,4)
-    plt.imshow(np.rad2deg(theta_out_arith), origin='lower')
-    plt.xlabel('x pixel')
-    plt.ylabel('y pixel')
-    plt.title(r'$\theta$ using $(|A(+,+)|+|A(+,-)|)/|A(+,0)|$')
-    plt.colorbar()
-    plt.show()
+    # plt.subplot(2,2,4)
+    # plt.imshow(np.rad2deg(theta_out_arith), origin='lower')
+    # plt.xlabel('x pixel')
+    # plt.ylabel('y pixel')
+    # plt.title(r'$\theta$ using $(|A(+,+)|+|A(+,-)|)/|A(+,0)|$')
+    # plt.colorbar()
+    # plt.show()
     
-    contour_plot(theta_out_arith, circle_center=circle_center, R=R)
+    contour_plot(theta_out_arith, circle_center=circle_center, R=R, crop_image=crop_raw_image, input_angle=angle_name-154.5)
     plt.show()
-    plot_calibrated_angle(theta=theta_calib, circle_center=circle_center, R=R)
-    plt.show()
+    # plot_calibrated_angle(theta=theta_calib, circle_center=circle_center, R=R, crop_image=crop_raw_image)
+    # plt.show()
     
     
-    plot_theta_central_row(to_keep=.8, width=width, edge_circ_cols=edge_circ_cols, 
-                           angle_name=angle_name, thetas=thetas, theta_calibrated=theta_calib, radius_of_circle=R, circle_center=circle_center)
+    plot_theta_central_row(width=width, 
+                           angle_name=angle_name, thetas=thetas, theta_calibrated=theta_calib, radius_of_circle=R, circle_center=circle_center, cols_lim=cols_interp_lim)
     plt.show()
-    plot_theta_cols(height=height, angle_name=angle_name, thetas=thetas, theta_calibrated=theta_calib, radius_of_circle=R, circle_center=circle_center)
+    plot_theta_cols(height=height, angle_name=angle_name, thetas=thetas, theta_calibrated=theta_calib, radius_of_circle=R, circle_center=circle_center, rows_lim=rows_interp_lim)
     #plt.xlim([400, 1600])
     # plt.ylim([18, 27])
     plt.show()
